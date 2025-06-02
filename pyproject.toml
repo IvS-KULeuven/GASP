@@ -1,0 +1,15 @@
+[project]
+name = "gasp"
+version = "0.1.0"
+description = "Implementation and results from Huijse et al. 2025 (https://arxiv.org/abs/2505.16884)"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "astroquery>=0.4.10",
+    "jupyter>=1.1.1",
+    "matplotlib>=3.10.3",
+    "nifty-ls>=1.0.1",
+    "numpyro>=0.18.0",
+    "polars>=1.30.0",
+    "tqdm>=4.67.1",
+]
