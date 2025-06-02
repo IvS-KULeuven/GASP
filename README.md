@@ -22,4 +22,3 @@ python src/download_gaia_lightcurves.py data/ data/qso_initial_selection.parquet
 
 See `notebooks/gaia_qso_initial_selection.ipynb` for the selection criteria that were used.
 
-
