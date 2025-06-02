@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "astroquery>=0.4.10",
+    "joblib>=1.5.1",
     "jupyter>=1.1.1",
     "matplotlib>=3.10.3",
     "nifty-ls>=1.0.1",

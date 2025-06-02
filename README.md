@@ -7,18 +7,26 @@ If you are only interested in the metadata of the candidates please see the `res
 
 ## Instructions
 
-Install the dependencies using `uv` and activate the virtual environment (in bash)
+(0) Install the dependencies using `uv` and activate the virtual environment (in bash)
 
 ```bash
 uv sync
- source .venv/bin/activate
+source .venv/bin/activate
 ```
 
-Download the light curve of the initial *Gaia* QSO selection: 
+(1) Download the light curve of the initial *Gaia* QSO selection: 
 
 ```bash
 python src/download_gaia_lightcurves.py data/ data/qso_initial_selection.parquet
 ```
 
 See `notebooks/gaia_qso_initial_selection.ipynb` for the selection criteria that were used.
+
+(2) Estimate the dominant period of the G band time series. Desire `8` with your desired number of threads
+
+```bash
+python src/periodicity.py data/qso_initial_selection/ results/periods 8
+```
+
+See `notebooks/gaia_qso_periods.ipynb` for details on how the periods are used to filter the initial selection.
 
