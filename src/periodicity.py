@@ -78,15 +78,13 @@ def extract_from_parquet(parquet_path: Path,
         time, mag, error = lc['g']
         features = {
             'sourceid': row['sourceid'][0],
-            'magnitude_median': np.median(mag),
             'magnitude_mean': np.mean(mag),
-            'magnitude_iqr': np.subtract(*np.percentile(mag, [75, 25])),
             'magnitude_std': np.std(mag),
             'time_duration': time[-1] - time[0]
             }
         per_features = extract_dominant_frequency_nifty(
             time, mag, error,
-            fmin=1e-3, fmax=25.0, fres=1e-4,
+            fmin=7e-4, fmax=25.0, fres=1e-5,
         )
         features = features | per_features
         result.append(features)
