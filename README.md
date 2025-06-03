@@ -17,7 +17,7 @@ source .venv/bin/activate
 (1) Download the light curve of the initial *Gaia* QSO selection 
 
 ```bash
-python src/download_gaia_lightcurves.py data/ data/qso_initial_selection.parquet
+python src/download_gaia_lightcurves.py data/ data/gaia_qso_initial_selection.parquet
 ```
 
 See `notebooks/gaia_qso_initial_selection.ipynb` for the selection criteria that were used.
@@ -25,7 +25,7 @@ See `notebooks/gaia_qso_initial_selection.ipynb` for the selection criteria that
 (2) Estimate the dominant period of the G band time series. Change `8` to your desired number of threads
 
 ```bash
-python src/periodicity.py data/qso_initial_selection/ results/periods 8
+python src/periodicity.py data/gaia_qso_initial_selection/ results/periods 8
 ```
 
 See `notebooks/gaia_qso_periods.ipynb` for details on how the estimated periods are used to filter the initial selection.
