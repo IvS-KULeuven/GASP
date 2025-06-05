@@ -63,22 +63,26 @@ def batch_harmonic(parquet_path: Path, temperature=0.8, num_epochs=20):
     if output_path.exists():
         return
     jax.clear_caches()
-    df = pl.read_parquet(parquet_path)
-    sid = df["sourceid"].item()
-    posterior = df['log_posterior'].item().to_numpy()
-    trace = df.drop(
-        ['sourceid', 'log_posterior', r'^n_eff_.*$',  r'^r_hat_.*$']
-    ).explode(pl.col('*')).to_numpy()
-    ln_inv_ev, ln_inv_ev_var = estimate_neg_log_evidence(
-        trace, posterior, temperature=temperature, num_epochs=num_epochs
-    )
-    pl.DataFrame(
-        {
-            'sourceid': sid,
-            'ln_inv_ev': ln_inv_ev,
-            'ln_inv_ev_var': ln_inv_ev_var
-        }
-    ).write_parquet(output_path)
+    df_mcmc = pl.read_parquet(parquet_path)
+    df_evidence = []
+    for k in range(len(df_mcmc)):
+        row = df_mcmc.slice(k, 1)
+        sid = row["sourceid"].item()
+        posterior = row['log_posterior'].item().to_numpy()
+        trace = row.drop(
+            ['sourceid', 'log_posterior', r'^n_eff_.*$',  r'^r_hat_.*$']
+        ).explode(pl.col('*')).to_numpy()
+        ln_inv_ev, ln_inv_ev_var = estimate_neg_log_evidence(
+            trace, posterior, temperature=temperature, num_epochs=num_epochs
+        )
+        df_evidence.append(
+            {
+                'sourceid': sid,
+                'ln_inv_ev': ln_inv_ev,
+                'ln_inv_ev_var': ln_inv_ev_var
+            }
+        )
+    pl.DataFrame(df_evidence).write_parquet(output_path, compression_level=22)
 
 
 if __name__ == '__main__':

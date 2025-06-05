@@ -23,6 +23,7 @@ import kernels
 logger = logging.getLogger(__name__)
 
 covariance_functions = {
+    'red': kernels.powered_exponential_covariance,  # gamma=1.0
     'red_1': kernels.powered_exponential_covariance,  # gamma=1.0
     'red_15': partial(kernels.powered_exponential_covariance, gamma=1.5),
     'red_2': partial(kernels.powered_exponential_covariance, gamma=2.0),
@@ -35,6 +36,7 @@ covariance_functions = {
 }
 
 priors = {
+    'red': {'red_length', 'red_stdev'},
     'red_1': {'red_length', 'red_stdev'},
     'red_15': {'red_length', 'red_stdev'},
     'red_2': {'red_length', 'red_stdev'},
