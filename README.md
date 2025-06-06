@@ -1,16 +1,18 @@
 # *Gaia* AGN Survey of Periodic variability (GASP)
 
-This repository holds the implementation of the methods described in ["Periodic Variability in Space Photometry of 181 New Supermassive Black Hole Binary Candidates"](https://arxiv.org/abs/2505.16884). Below you will find instructions to download the data from the *Gaia* archive and process it as described in the paper. The full dataset and results of the MCMC traces and Bayesian evidences are not included in this GitHub repository, but can be found in Zenodo (link pending). 
+This repository holds the implementation of the methods described in ["Periodic Variability in Space Photometry of 181 New Supermassive Black Hole Binary Candidates"](https://arxiv.org/abs/2505.16884). 
 
 For the metadata of the candidates, see the `results/gasp.csv` (48k sources) and `results/gasp_only_candidates.csv` (181 sources) in this repository and their electronic versions (link pending). These lists provide *Gaia* source identifiers, the corresponding Bayes factor, positions, and identifiers from crossmatched surveys. The light curves of the 181 candidates can be found in `data/gaia_smbhb_candidates_lc_compressed.parquet`.
 
 The contents of the `notebooks` directory in this repository include:
 
 - `gaia_qso_initial_selection.ipynb`: Shows the criteria used to create the initial *Gaia* AGN selection. The result of this notebook is `gaia_qso_initial_selection.parquet`.
-- `gaia_qso_periods.ipynb`: Details how the Lomb-Scargle periods are used to filter the initial selection. The result of this notebook is the 48k sources found in `data/gaia_qso_period_gt100d/`
+- `gaia_qso_periods.ipynb`: Details how the Lomb-Scargle periods are used to filter the initial selection. The result of this notebook is the 48k sources found in `data/gaia_qso_period_gt100d/`. (*) This notebook assumes that the light curves from the initial selection are in `data/gaia_qso_initial_selection` (see note below).
 - `gaia_MCMC_example.ipynb`: Demonstrates how to fit the Gaussian processes and estimate the Bayesian evidences with a few *Gaia* sources. 
-- `gaia_MCMC_population.ipynb`: Shows how the Bayes factors are computed from the evidences and how the final selection of SMBHB candidates is produced. The results of this notebook are `results/bayes_factors.parquet` and the plots in `notebooks/figures`.
+- `gaia_MCMC_population.ipynb`: Shows how the Bayes factors are computed from the evidences and how the final selection of SMBHB candidates is produced. The results of this notebook are `results/bayes_factors.parquet` and the plots in `notebooks/figures`. (*) This notebook assummes that the MCMC traces and evidences exist in `results/mcmc` (see note below).
 - `gasp_crossmatch.ipynb`: Enriches the GASP catalogue with metadata and source identifiers from other AGN catalogues. It also explores the *Gaia* time series of SMBHB candidates from the literature. The result of this notebook is `results/gasp.csv`.
+
+**Note:** To fully execute the notebooks marked with (*) you can either download the data and results from Zenodo or follow the instructions below to download the data from the *Gaia* archive and process it as described in the paper.
 
 ## Setup
 
