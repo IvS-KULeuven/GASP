@@ -12,7 +12,8 @@ The contents of the `notebooks` directory in this repository include:
 - `gaia_MCMC_population.ipynb`: Shows how the Bayes factors are computed from the evidences and how the final selection of SMBHB candidates is produced. The results of this notebook are `results/bayes_factors.parquet` and the plots in `notebooks/figures`. (*) This notebook assummes that the MCMC traces and evidences exist in `results/mcmc` (see note below).
 - `gasp_crossmatch.ipynb`: Enriches the GASP catalogue with metadata and source identifiers from other AGN catalogues. It also explores the *Gaia* time series of SMBHB candidates from the literature. The result of this notebook is `results/gasp.csv`.
 
-**Note:** To fully execute the notebooks marked with (*) you can either download the data and results from Zenodo or follow the instructions below to download the data from the *Gaia* archive and process it as described in the paper.
+**Note:** To fully execute the notebooks marked with (*) you can either download the data and results from Zenodo [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.15608137.svg)](https://doi.org/10.5281/zenodo.15608137) or follow the instructions below to download the data from the *Gaia* archive and process it as described in the paper.
+
 
 ## Setup
 
