@@ -2,7 +2,7 @@
 
 This repository holds the implementation of the methods described in ["Periodic Variability in Space Photometry of 181 New Supermassive Black Hole Binary Candidates"](https://arxiv.org/abs/2505.16884). Below you will find instructions to download the data from the *Gaia* archive and process it as described in the paper. The full dataset and results of the MCMC traces and Bayesian evidences are not included in this GitHub repository, but can be found in Zenodo (link pending). 
 
-For the metadata of the candidates, see the `results/gasp.csv` (48k sources) and `results/gasp_only_candidates.csv` (181 sources) in this repository and their electronic versions (link pending). These lists provide *Gaia* source identifiers, the corresponding Bayes factor, positions, and identifiers from crossmatched surveys.
+For the metadata of the candidates, see the `results/gasp.csv` (48k sources) and `results/gasp_only_candidates.csv` (181 sources) in this repository and their electronic versions (link pending). These lists provide *Gaia* source identifiers, the corresponding Bayes factor, positions, and identifiers from crossmatched surveys. The light curves of the 181 candidates can be found in `data/gaia_smbhb_candidates_lc_compressed.parquet`.
 
 The contents of the `notebooks` directory in this repository include:
 
