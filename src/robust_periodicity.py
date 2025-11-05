@@ -213,7 +213,8 @@ def amp_phase_from_ab(a, b, Vaa, Vbb, Vab):
 
 
 def stability_test(time, mag, err, frequency, debug: bool = False):
-    (t1, m1, e1), (t2, m2, e2) = split_lightcurve_in_two(time - np.mean(time), mag, err, 'time')
+    mean_time = np.mean(time)
+    (t1, m1, e1), (t2, m2, e2) = split_lightcurve_in_two(time - mean_time, mag, err, 'time')
     soln, _ = fit_gp(jnp.asarray(t1), jnp.asarray(m1), jnp.asarray(e1), period=1./frequency, n_harmonics=1)
     params, cov_params = soln.params['mean'], soln.state.hess_inv[-3:, -3:]
     #_, params, cov_params = fit_sine_wave(jnp.asarray(t1), jnp.asarray(m1), jnp.asarray(e1), 1/best_freq, return_params=True)
@@ -233,10 +234,10 @@ def stability_test(time, mag, err, frequency, debug: bool = False):
     snr2 = A2/sigma_A2
     if debug:
         _, ax = plt.subplots(figsize=(6, 3))
-        mid = (time[-1] + time[0])/2
-        t_ = np.linspace(np.amin(t1), mid, 100)
+        mid = (time[-1] + time[0] - 2*mean_time)/2
+        t_ = np.linspace(np.amin(t1), mid, 100) + mean_time
         ax.plot(t_, A1*np.cos(2*np.pi*t_*frequency - phi1))
-        t_ = np.linspace(mid, np.amax(t2), 100)
+        t_ = np.linspace(mid, np.amax(t2), 100) + mean_time
         ax.plot(t_, A2*np.cos(2*np.pi*t_*frequency - phi2))
         ax.errorbar(time, mag-np.mean(mag), err, fmt='.', c='k')
         ax.invert_yaxis()
@@ -263,6 +264,7 @@ class Task(StrEnum):
     FALSE_ALARM_PROBABILITIES = "false_alarm_probabilities"
     GP_FITTING = "gp_fitting"
     STABILITY_METRICS = "stability_metrics"
+    PERIODOGRAM_SPLIT = "periodogram_split"
 
 def extract_from_parquet(parquet_path: Path,
                          save_dir: Path,
@@ -319,6 +321,26 @@ def extract_from_parquet(parquet_path: Path,
             for freq in best_frequencies:
                 params = fit_fourier_series_plus_red_noise(time, mag, err, freq, n_harmonics=n_harmonics)
                 result.append({'sourceid': sid, 'frequency': freq, 'n_harmonics': n_harmonics} | params)
+        elif task is Task.PERIODOGRAM_SPLIT:
+            (t1, m1, e1), (t2, m2, e2) = split_lightcurve_in_two(time, mag, err, 'time')
+            freqs, ampls = compute_periodogram(t1, m1, e1, fmin=7e-4, fmax=1.0, fres=1e-5)
+            best_idxs = find_local_maxima(ampls, how_many=3)
+            best_frequencies1 = freqs[best_idxs]
+            best_amplitudes1 = ampls[best_idxs]
+            freqs, ampls = compute_periodogram(t2, m2, e2, fmin=7e-4, fmax=1.0, fres=1e-5)
+            best_idxs = find_local_maxima(ampls, how_many=3) # This come in decreasing order of amplitude
+            best_frequencies2 = freqs[best_idxs]
+            best_amplitudes2 = ampls[best_idxs]
+            best = {
+                'time_duration_left': t1[-1]-t1[0],
+                'best_frequencies_left': best_frequencies1.tolist(), 
+                'best_amplitudes_left': best_amplitudes1.tolist(),
+                'time_duration_right': t2[-1]-t2[0],
+                'best_frequencies_right': best_frequencies2.tolist(), 
+                'best_amplitudes_right': best_amplitudes2.tolist()
+
+            }
+            result.append({'sourceid': sid} | best)
         elif task is Task.STABILITY_METRICS:
             best_frequencies = jnp.asarray(row['best_frequencies'][0].to_numpy())
             try:
