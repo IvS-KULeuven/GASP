@@ -250,11 +250,18 @@ def stability_test_f(time, mag, err, frequencies):
     cols = zip(*rows)
     return {k: list(col) for k, col in zip(keys, cols)}
 
+def fit_fourier_series_plus_red_noise(time, mag, err, freq, init_scale: float = 100., init_logit_gamma: float = 0., n_harmonics:int = 1):
+    soln, _ = fit_gp(time, mag, err, period=1./freq, n_harmonics=n_harmonics, init_scale=init_scale, init_logit_gamma=init_logit_gamma)
+    params = {k: v.tolist() for k, v in soln.params.items()}
+    params['mle'] = soln.state.fun_val
+    return params
+
 from enum import StrEnum
 
 class Task(StrEnum):
     PERIODOGRAM_MAXIMA = "periodogram_maxima"
     FALSE_ALARM_PROBABILITIES = "false_alarm_probabilities"
+    GP_FITTING = "gp_fitting"
     STABILITY_METRICS = "stability_metrics"
 
 def extract_from_parquet(parquet_path: Path,
@@ -271,7 +278,7 @@ def extract_from_parquet(parquet_path: Path,
     )
     if df.height == 0:
         return None
-    if task is Task.FALSE_ALARM_PROBABILITIES or task is Task.STABILITY_METRICS:
+    if task is not Task.PERIODOGRAM_MAXIMA:
         # I need the best frequencies from PERIODOGRAM_MAXIMA
         df = df.join(
             pl.read_parquet(
@@ -304,6 +311,11 @@ def extract_from_parquet(parquet_path: Path,
             best_frequencies = jnp.asarray(row['best_frequencies'][0].to_numpy())
             faps = false_alarm_probabilities(best_frequencies, [1e-3, 1e-4], time, mag, err, num_reps=200)
             result.append({'sourceid': sid} | faps)
+        elif task is Task.GP_FITTING:
+            best_frequencies = jnp.asarray(row['best_frequencies'][0].to_numpy())
+            for freq in best_frequencies[:3]:
+                params = fit_fourier_series_plus_red_noise(time, mag, err, freq, n_harmonics=1)
+                result.append({'sourceid': sid, 'frequency': freq} | params)
         elif task is Task.STABILITY_METRICS:
             best_frequencies = jnp.asarray(row['best_frequencies'][0].to_numpy())
             try:
