@@ -272,13 +272,10 @@ def extract_from_parquet(parquet_path: Path,
     write_path = save_dir / task.value / parquet_path.name
     if not overwrite and (write_path).exists():
         return None
-    df = pl.read_parquet(
-        parquet_path,
-        columns=['sourceid', 'g_obstimes', 'g_val', 'g_valerr']
-    )
+    df = pl.read_parquet(parquet_path)
     if df.height == 0:
         return None
-    if task is not Task.PERIODOGRAM_MAXIMA:
+    if task is Task.FALSE_ALARM_PROBABILITIES:
         # I need the best frequencies from PERIODOGRAM_MAXIMA
         df = df.join(
             pl.read_parquet(
@@ -287,6 +284,11 @@ def extract_from_parquet(parquet_path: Path,
             ),
             on='sourceid'
         )
+    elif task is Task.GP_FITTING or task is Task.STABILITY_METRICS:
+        for col in ['best_frequencies', 'best_amplitudes']:
+            if col not in df.columns:
+                raise ValueError(f"Task {task} needs column {col}.")
+
     result = []
     for k in range(df.height):
         row = df.slice(k, 1)
@@ -313,9 +315,10 @@ def extract_from_parquet(parquet_path: Path,
             result.append({'sourceid': sid} | faps)
         elif task is Task.GP_FITTING:
             best_frequencies = jnp.asarray(row['best_frequencies'][0].to_numpy())
-            for freq in best_frequencies[:3]:
-                params = fit_fourier_series_plus_red_noise(time, mag, err, freq, n_harmonics=1)
-                result.append({'sourceid': sid, 'frequency': freq} | params)
+            n_harmonics = 1
+            for freq in best_frequencies:
+                params = fit_fourier_series_plus_red_noise(time, mag, err, freq, n_harmonics=n_harmonics)
+                result.append({'sourceid': sid, 'frequency': freq, 'n_harmonics': n_harmonics} | params)
         elif task is Task.STABILITY_METRICS:
             best_frequencies = jnp.asarray(row['best_frequencies'][0].to_numpy())
             try:
