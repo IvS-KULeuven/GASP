@@ -50,10 +50,10 @@ def find_local_maxima(x: np.ndarray,
     return np.arange(1, len(x)-1)[local_maxima][idx]
 
 
-def compute_periodogram(time, mag, err, fmin: float, fmax: float, fres: float):
+def compute_periodogram(time, mag, err, fmin: float, fmax: float, fres: float, normalization: str='standard'):
     periodogram = partial(
         finufft.lombscargle,
-        t=time, y=mag, dy=err, nthreads=1,
+        t=time, y=mag, dy=err, nthreads=1, normalization=normalization,
     )
     Nf = int((fmax - fmin) / fres)
     freqs = fmin + np.arange(Nf) * fres
@@ -87,7 +87,10 @@ def fit_gp(time, mag, err, period: float, n_harmonics: int, init_scale: float = 
     return soln, gp
 
 def fit_gp_red_noise(time, mag, err, init_scale: float = 100., init_logit_gamma: float = 0.):
-    soln, gp = fit_gp(time, mag, err, n_harmonics=0, period=1.0, init_scale=init_scale, init_logit_gamma=init_logit_gamma)
+    soln, gp = fit_gp(
+        jnp.asarray(time), jnp.asarray(mag), jnp.asarray(err), 
+        n_harmonics=0, period=1.0, init_scale=init_scale, init_logit_gamma=init_logit_gamma
+    )
     return gp, soln.params, soln.state.fun_val
 
 
@@ -155,6 +158,18 @@ def false_alarm_probabilities(freqs, faps, time, mag, err, seed=1234, num_reps=1
         red_noise_ampl.append(vmap(test_statistic)(period=1./freqs))
     red_noise_ampl = jnp.stack(red_noise_ampl)
     return {str(fap): jnp.quantile(red_noise_ampl, q=1-fap, axis=0).tolist() for fap in faps} | params
+
+def sugeves_fap(alphas, time, mag, err, fmin, fmax, fres, seed=1234, num_reps=1000):
+    gp, params, mle = fit_gp_red_noise(time, mag, err)
+    params = {k: v.tolist() for k, v in params.items()}
+    params['mle'] = mle
+    gp_prior_samples = gp.sample(random.PRNGKey(seed), shape=(num_reps,))
+    dist_maxima = np.array([np.amax(
+        compute_periodogram(time, np.asarray(gp_prior_sample), err, fmin, fmax, fres)[1]
+    ) for gp_prior_sample in gp_prior_samples])
+    return {str(alpha): np.quantile(dist_maxima, q=1-alpha, axis=0).tolist() for alpha in alphas} | params
+
+
 
 """
 def process_single_lightcurve(time, mag, err, fmin, fmax, fres, k=100, num_reps=1000, faps=[1e-2, 1e-3, 1e-4]):
@@ -252,7 +267,10 @@ def stability_test_f(time, mag, err, frequencies):
     return {k: list(col) for k, col in zip(keys, cols)}
 
 def fit_fourier_series_plus_red_noise(time, mag, err, freq, init_scale: float = 100., init_logit_gamma: float = 0., n_harmonics:int = 1):
-    soln, _ = fit_gp(time, mag, err, period=1./freq, n_harmonics=n_harmonics, init_scale=init_scale, init_logit_gamma=init_logit_gamma)
+    soln, _ = fit_gp(
+        jnp.asarray(time), jnp.asarray(mag), jnp.asarray(err), 
+        period=1./freq, n_harmonics=n_harmonics, init_scale=init_scale, init_logit_gamma=init_logit_gamma
+    )
     params = {k: v.tolist() for k, v in soln.params.items()}
     params['mle'] = soln.state.fun_val
     return params
@@ -262,6 +280,7 @@ from enum import StrEnum
 class Task(StrEnum):
     PERIODOGRAM_MAXIMA = "periodogram_maxima"
     FALSE_ALARM_PROBABILITIES = "false_alarm_probabilities"
+    SUVEGES_FAP = "suveges_fap"
     GP_FITTING = "gp_fitting"
     STABILITY_METRICS = "stability_metrics"
     PERIODOGRAM_SPLIT = "periodogram_split"
@@ -270,6 +289,7 @@ def extract_from_parquet(parquet_path: Path,
                          save_dir: Path,
                          task: Task,
                          overwrite: bool = False) -> None:
+    jax.config.update("jax_enable_x64", True)
     (save_dir / task.value).mkdir(exist_ok=True, parents=True)
     write_path = save_dir / task.value / parquet_path.name
     if not overwrite and (write_path).exists():
@@ -321,21 +341,30 @@ def extract_from_parquet(parquet_path: Path,
             for freq in best_frequencies:
                 params = fit_fourier_series_plus_red_noise(time, mag, err, freq, n_harmonics=n_harmonics)
                 result.append({'sourceid': sid, 'frequency': freq, 'n_harmonics': n_harmonics} | params)
+        elif task is Task.SUVEGES_FAP:
+            T = time[-1] - time[0]
+            faps = sugeves_fap([1e-1, 1e-2, 1e-3], time, mag, err, 1./T, 1.0, 1e-4, num_reps=1000)
+            result.append({'sourceid': sid} | faps)
         elif task is Task.PERIODOGRAM_SPLIT:
             (t1, m1, e1), (t2, m2, e2) = split_lightcurve_in_two(time, mag, err, 'time')
-            freqs, ampls = compute_periodogram(t1, m1, e1, fmin=7e-4, fmax=1.0, fres=1e-5)
+            T1 = t1[-1] - t1[0]
+            T2 = t2[-1] - t2[0]
+            Tmin = min(T1, T2)
+            freqs, ampls = compute_periodogram(t1, m1, e1, fmin=1/Tmin, fmax=1.0, fres=1e-5)
             best_idxs = find_local_maxima(ampls, how_many=3)
             best_frequencies1 = freqs[best_idxs]
             best_amplitudes1 = ampls[best_idxs]
-            freqs, ampls = compute_periodogram(t2, m2, e2, fmin=7e-4, fmax=1.0, fres=1e-5)
+            freqs, ampls = compute_periodogram(t2, m2, e2, fmin=1/Tmin, fmax=1.0, fres=1e-5)
             best_idxs = find_local_maxima(ampls, how_many=3) # This come in decreasing order of amplitude
             best_frequencies2 = freqs[best_idxs]
             best_amplitudes2 = ampls[best_idxs]
             best = {
-                'time_duration_left': t1[-1]-t1[0],
+                'time_duration_left': T1,
+                'num_obs_left': len(t1),
                 'best_frequencies_left': best_frequencies1.tolist(), 
                 'best_amplitudes_left': best_amplitudes1.tolist(),
-                'time_duration_right': t2[-1]-t2[0],
+                'time_duration_right': T2,
+                'num_obs_right': len(t2),
                 'best_frequencies_right': best_frequencies2.tolist(), 
                 'best_amplitudes_right': best_amplitudes2.tolist()
 
@@ -354,7 +383,7 @@ def extract_from_parquet(parquet_path: Path,
 
 
 if __name__ == '__main__':
-    jax.config.update("jax_enable_x64", True)
+    # jax.config.update("jax_enable_x64", True)
     parser = argparse.ArgumentParser(description='Extract features')
     parser.add_argument('path_to_dataset', type=str)
     parser.add_argument('save_directory', type=str)
