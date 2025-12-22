@@ -106,6 +106,19 @@ def compute_periodogram(time, mag, err, fmin: float, fmax: float, fres: float, n
     ampls = periodogram(fmin=fmin, df=fres, Nf=len(freqs))
     return freqs, ampls
 
+def max_periodogram_amplitude_distribution(time, vals, err, fmin, fmax, fres, batch_size: int = 2000):
+    num_samples = vals.shape[0]
+    max_ampl = np.empty(num_samples, dtype=np.float64)
+    for start in range(0, num_samples, batch_size):
+        stop = min(start + batch_size, num_samples)
+        vals_batch = vals[start:stop]
+        _, ampls = compute_periodogram(
+            time, np.asarray(vals_batch), np.tile(err[None, :], (vals_batch.shape[0], 1)), 
+            fmin, fmax, fres
+        )
+        max_ampl[start:stop] = np.max(ampls, axis=-1)
+    return max_ampl
+
 def fit_gp(time, mag, err, period: float, n_harmonics: int, init_scale: float = 100.0, init_logit_gamma: float = 0., fit_gamma: bool = True):
     if n_harmonics > 0:
         initial_mean = jnp.zeros(shape=(n_harmonics*2 + 1,))
@@ -204,11 +217,11 @@ def bayesian_red_noise(x, yerr, y, x_interp=None):
     if y is not None and x_interp is not None:
         numpyro.deterministic("pred", gp.condition(y, x_interp).gp.loc)
 
-def mcmc_red_noise(time, mag, err, 
+def mcmc_red_noise(time, mag, err, init_seed=1234,
                    num_warmup: int = 500, num_samples: int = 2000, num_chains: int = 4):
     nuts_kernel = NUTS(bayesian_red_noise, target_accept_prob=0.9, dense_mass=True, max_tree_depth=(5, 10))
     mcmc = MCMC(nuts_kernel, num_warmup=num_warmup, num_samples=num_samples, num_chains=num_chains, progress_bar=False, jit_model_args=True, chain_method='sequential')
-    rng_key = random.PRNGKey(55873)
+    rng_key = random.PRNGKey(init_seed)
     mcmc.run(rng_key, x=jnp.asarray(time), y=jnp.asarray(mag), yerr=jnp.asarray(err))
     samples = mcmc.get_samples()
     r_hats, n_effs = {}, {}
@@ -243,7 +256,7 @@ class Task(StrEnum):
     FIT_FOURIER_SERIES_MLE = "fourier_mle"
     FIT_RED_NOISE_MLE = "red_noise_mle"
     FIT_RED_NOISE_MCMC = "red_noise_mcmc"
-    MONTE_CARLO_FAP = "monte_carlo_fap"
+    MONTE_CARLO_FAP_MLE = "monte_carlo_fap_mle"
 
 def extract_from_parquet(parquet_path: Path,
                          save_dir: Path,
@@ -259,18 +272,16 @@ def extract_from_parquet(parquet_path: Path,
     df = pl.read_parquet(parquet_path)
     if df.height == 0:
         return None
-    """
 
-    if task is Task.BALUEV_FAP:
-        # I need the best frequencies from PERIODOGRAM_MAXIMA
+    if task is Task.MONTE_CARLO_FAP_MLE:
+        if not (save_dir / 'red_noise_mle').exists():
+            raise ValueError("You need to fit the GPs before estimating the FAPs")
         df = df.join(
             pl.read_parquet(
-                save_dir / 'periodogram_maxima' / parquet_path.name,
-                columns=['sourceid', 'best_frequencies']
+                save_dir / 'red_noise_mle' / parquet_path.name,
             ),
             on='sourceid'
         )
-    """
     if task is Task.FIT_FOURIER_SERIES_MLE:
         for col in ['best_frequencies', 'best_amplitudes']:
             if col not in df.columns:
@@ -312,9 +323,11 @@ def extract_from_parquet(parquet_path: Path,
             result.append(
                 {'sourceid': row['sourceid'].item()} | r_hats | n_effs | {k: v.tolist() for k, v in samples.items()}
             )
-        #elif task is Task.MONTE_CARLO_FAP_MLE:
-        #    faps = mc_fap_distribution(time, mag, err, 1./timespan, 1.0, fres, num_reps=1000)
-        #    result.append({'sourceid': sid} | faps)
+        elif task is Task.MONTE_CARLO_FAP_MLE:
+            gp = build_gp(row.to_dicts()[0], X=time, Yerr=err, kernel_fn=PoweredExp)
+            gp_prior_samples = gp.sample(random.PRNGKey(1234), shape=(10000,))
+            ampl_dist = max_periodogram_amplitude_distribution(time, gp_prior_samples, err, 1./timespan, 1.0, fres, batch_size=100)
+            result.append({'sourceid': sid, 'max_periodogram_amplitudes': ampl_dist.tolist()})
     pl.from_dicts(result).write_parquet(write_path)
 
 
