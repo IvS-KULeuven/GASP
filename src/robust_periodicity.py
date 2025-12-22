@@ -2,21 +2,56 @@ from pathlib import Path
 import argparse
 from functools import partial
 import numpy as np
-from matplotlib import pyplot as plt
-import jax.numpy as jnp
 import jax
 from jax import jit, random, vmap
 import jaxopt
 from tinygp import GaussianProcess, kernels
 import polars as pl
 from nifty_ls import finufft
-from preprocessing import pack_light_curve
 from parallel_utils import apply_in_parallel
-# from kernels_tinygp import PoweredExp
 
 from jax import numpy as jnp
+from jax.nn import sigmoid
 from tinygp.helpers import JAXArray
 from tinygp.kernels import Stationary
+import numpyro
+import numpyro.distributions as dist
+from numpyro.infer import MCMC, NUTS
+from numpyro.diagnostics import summary
+
+def unpack_light_curve(df_row: pl.DataFrame) -> dict[str, np.ndarray]:
+    def col_to_array(col: pl.Series) -> np.ndarray:
+        return col[0].to_numpy().astype('float64')
+    light_curve = {}
+    bands = [col.split('_')[0] for col in df_row.columns if 'obstimes' in col]
+    for band in bands:
+        time = col_to_array(df_row[f'{band}_obstimes'])
+        val = col_to_array(df_row[f'{band}_val'])
+        valerr = col_to_array(df_row[f'{band}_valerr']) 
+        light_curve[band] = np.stack([time, val, valerr])
+    return light_curve
+
+def clean_light_curve(lc, remove_extreme_errors: bool = True, remove_extreme_values: bool = True) -> dict[str, np.ndarray]:
+    clean_light_curve = {}
+    for band, lcb in lc.items():
+        valerr = lcb[-1]
+        mask = ~np.isinf(valerr) & ~np.isnan(valerr)
+        lcb = lcb[:, mask]
+        if remove_extreme_errors:
+            valerr = lcb[-1]
+            outlier_abs = valerr > 0.5
+            iqr_err = np.subtract(*np.percentile(valerr, (75, 25)))
+            outlier_rel = valerr  > np.median(valerr) + 12*iqr_err
+            outlier = outlier_abs | outlier_rel
+            lcb = lcb[:, ~outlier]
+        if remove_extreme_values:
+            val = lcb[-2]
+            iqr_val = np.subtract(*np.percentile(val, (75, 25)))
+            outlier = np.abs(val - np.median(val)) > 2*iqr_val
+            lcb = lcb[:, ~outlier]            
+        idx = lcb[0].argsort()
+        clean_light_curve[band] = lcb[:, idx]
+    return clean_light_curve
 
 class PoweredExp(Stationary):
 
@@ -30,17 +65,28 @@ class PoweredExp(Stationary):
         r = self.distance.distance(X1, X2) / self.scale
         return jnp.exp(-r ** self.gamma)
 
+def box_constraint(eta, min_val, max_val):
+    return min_val + (max_val-min_val)*sigmoid(eta)
 
 def build_gp(theta, X, Yerr, kernel_fn, mean_fn=None):
-    amps = jnp.exp(theta["log_amps"])
-    scales = jnp.exp(theta["log_scales"])
-    gamma = 1.0 + 1./(1. + jnp.exp(-theta['logit_gamma']))
-    return GaussianProcess(
-        amps * kernel_fn(scales, gamma=gamma),
-        X, 
-        diag=Yerr**2, 
-        mean=theta["mean"] if mean_fn is None else partial(mean_fn, theta["mean"])
+    return _build_gp(
+        X=X, Yerr=Yerr, log_sigma=theta['log_sigma'], log_tau=theta['log_tau'], mean=theta['mean'],
+        kernel_fn=kernel_fn, mean_fn=mean_fn, logit_gamma=theta['logit_gamma'] if 'logit_gamma' in theta else None,
     )
+
+
+def _build_gp(X, Yerr, log_sigma, log_tau, mean, kernel_fn, logit_gamma=None, mean_fn=None):
+    sigma = jnp.exp(log_sigma)
+    tau = jnp.exp(log_tau)
+    if logit_gamma is not None:
+        gamma = box_constraint(logit_gamma, 1.0, 2.0)
+        kernel = sigma**2 * kernel_fn(tau, gamma=gamma)
+    else:
+        kernel = sigma**2 * kernel_fn(tau)
+    if mean_fn is not None:
+        mean = partial(mean_fn, mean)
+    return GaussianProcess(kernel, X, diag=Yerr**2, mean=mean)
+
 
 def find_local_maxima(x: np.ndarray,
                       how_many: int,
@@ -60,22 +106,22 @@ def compute_periodogram(time, mag, err, fmin: float, fmax: float, fres: float, n
     ampls = periodogram(fmin=fmin, df=fres, Nf=len(freqs))
     return freqs, ampls
 
-def fit_gp(time, mag, err, period: float, n_harmonics: int, init_scale: float = 100.0, init_logit_gamma: float = 0.):
+def fit_gp(time, mag, err, period: float, n_harmonics: int, init_scale: float = 100.0, init_logit_gamma: float = 0., fit_gamma: bool = True):
     if n_harmonics > 0:
-        initial_mean = np.zeros(shape=(n_harmonics*2 + 1,))
-        initial_mean[0] = np.mean(mag)
+        initial_mean = jnp.zeros(shape=(n_harmonics*2 + 1,))
+        initial_mean[0] = jnp.mean(mag)
         mean_fn = partial(fourier_series_mean_function, period=period, n_harmonics=n_harmonics)
     else:
-        initial_mean = np.mean(mag)
+        initial_mean = jnp.mean(mag)
         mean_fn = None
     theta_init = {
         "mean": initial_mean,
-        "log_amps": np.log(np.std(mag)),
-        "log_scales": np.log(init_scale),
-        "logit_gamma": init_logit_gamma, 
-
+        "log_sigma": jnp.log(jnp.std(mag)),
+        "log_tau": jnp.log(init_scale),
     }
-    build_gp_ = partial(build_gp, X=time, Yerr=err, kernel_fn=PoweredExp, mean_fn=mean_fn)
+    if fit_gamma:
+        theta_init['logit_gamma'] = init_logit_gamma
+    build_gp_ = partial(build_gp, X=time, Yerr=err, kernel_fn=PoweredExp if fit_gamma else kernels.Exp, mean_fn=mean_fn)
    
     @jax.jit
     def loss(params):
@@ -86,10 +132,10 @@ def fit_gp(time, mag, err, period: float, n_harmonics: int, init_scale: float = 
     gp = build_gp_(soln.params)
     return soln, gp
 
-def fit_gp_red_noise(time, mag, err, init_scale: float = 100., init_logit_gamma: float = 0.):
+def fit_gp_red_noise(time, mag, err, init_scale: float = 100., init_logit_gamma: float = 0., fit_gamma=True):
     soln, gp = fit_gp(
         jnp.asarray(time), jnp.asarray(mag), jnp.asarray(err), 
-        n_harmonics=0, period=1.0, init_scale=init_scale, init_logit_gamma=init_logit_gamma
+        n_harmonics=0, period=1.0, init_scale=init_scale, init_logit_gamma=init_logit_gamma, fit_gamma=fit_gamma,
     )
     return gp, soln.params, soln.state.fun_val
 
@@ -146,18 +192,30 @@ def fit_sine_wave(x, y, yerr, period, return_params=False, standardize_data=Fals
         return stat, params, cov_params
     return stat
 
+def bayesian_red_noise(x, yerr, y, x_interp=None):
+    smallest_dt = jnp.amin(x[1:] - x[:-1])
+    timespan = x[-1] - x[0]
+    mean = numpyro.sample("mean", dist.Normal(jnp.mean(y), 0.5))
+    log_sigma = numpyro.sample("log_sigma", dist.Normal(jnp.log(jnp.std(y)), 0.5))
+    log_tau = numpyro.sample("log_tau", dist.TruncatedNormal(jnp.log(100.), 1.0, low=jnp.log(smallest_dt), high=jnp.log(timespan)))
+    logit_gamma = numpyro.sample("logit_gamma", dist.Normal(0, 1))
+    gp = jax.jit(_build_gp, static_argnames=['kernel_fn', 'mean_fn'])(X=x, Yerr=yerr**2, log_sigma=log_sigma, log_tau=log_tau, mean=mean, kernel_fn=PoweredExp, logit_gamma=logit_gamma)
+    numpyro.sample("gp", gp.numpyro_dist(), obs=y)
+    if y is not None and x_interp is not None:
+        numpyro.deterministic("pred", gp.condition(y, x_interp).gp.loc)
 
-def false_alarm_probabilities(freqs, faps, time, mag, err, seed=1234, num_reps=1000):
-    gp, params, mle = fit_gp_red_noise(time, mag, err)
-    params = {k: v.tolist() for k, v in params.items()}
-    params['mle'] = mle
-    gp_prior_samples = gp.sample(random.PRNGKey(seed), shape=(num_reps,))
-    red_noise_ampl = []
-    for gp_prior in gp_prior_samples:
-        test_statistic = partial(fit_sine_wave, x=time, y=gp_prior, yerr=err)
-        red_noise_ampl.append(vmap(test_statistic)(period=1./freqs))
-    red_noise_ampl = jnp.stack(red_noise_ampl)
-    return {str(fap): jnp.quantile(red_noise_ampl, q=1-fap, axis=0).tolist() for fap in faps} | params
+def mcmc_red_noise(time, mag, err, 
+                   num_warmup: int = 500, num_samples: int = 2000, num_chains: int = 4):
+    nuts_kernel = NUTS(bayesian_red_noise, target_accept_prob=0.9, dense_mass=True, max_tree_depth=(5, 10))
+    mcmc = MCMC(nuts_kernel, num_warmup=num_warmup, num_samples=num_samples, num_chains=num_chains, progress_bar=False, jit_model_args=True, chain_method='sequential')
+    rng_key = random.PRNGKey(55873)
+    mcmc.run(rng_key, x=jnp.asarray(time), y=jnp.asarray(mag), yerr=jnp.asarray(err))
+    samples = mcmc.get_samples()
+    r_hats, n_effs = {}, {}
+    for k, v in summary(mcmc.get_samples(group_by_chain=True)).items():
+        r_hats[f'r_hat_{k}'] = v['r_hat'].item()
+        n_effs[f'n_eff_{k}'] = v['n_eff'].item()
+    return samples, r_hats, n_effs
 
 def sugeves_fap(alphas, time, mag, err, fmin, fmax, fres, seed=1234, num_reps=1000):
     gp, params, mle = fit_gp_red_noise(time, mag, err)
@@ -168,103 +226,6 @@ def sugeves_fap(alphas, time, mag, err, fmin, fmax, fres, seed=1234, num_reps=10
         compute_periodogram(time, np.asarray(gp_prior_sample), err, fmin, fmax, fres)[1]
     ) for gp_prior_sample in gp_prior_samples])
     return {str(alpha): np.quantile(dist_maxima, q=1-alpha, axis=0).tolist() for alpha in alphas} | params
-
-
-
-"""
-def process_single_lightcurve(time, mag, err, fmin, fmax, fres, k=100, num_reps=1000, faps=[1e-2, 1e-3, 1e-4]):
-    freqs, ampls = compute_periodogram(time, mag, err, fmin, fmax, fres)
-    best_idxs = find_local_maxima(ampls, k)
-    sort_idx = np.argsort(freqs[best_idxs])
-    best_idxs = best_idxs[sort_idx]
-    best_frequencies = freqs[best_idxs]
-    best_amplitudes = ampls[best_idxs]
-    best = {'best_frequencies': best_frequencies.tolist(), 'best_amplitudes': best_amplitudes.tolist()}
-    return best | false_alarm_probabilities(best_frequencies, faps, time, mag, err, num_reps=num_reps)
-"""
-
-def split_lightcurve_in_two(time, mag, err, how):
-    n = len(time)
-    n_even = (n // 2) * 2
-    match how:
-        case 'random':
-            perm = np.random.permutation(n)[:n_even]
-            i1 = np.sort(perm[: n_even // 2])
-            i2 = np.sort(perm[n_even // 2 :])
-        case 'half':
-            i_all = np.arange(n_even)
-            i1 = i_all[: n_even // 2]
-            i2 = i_all[n_even // 2 :]
-        case 'time':
-            mid = 0.5 * (time[0] + time[-1])
-            mask = time <= mid
-            i1 = np.nonzero(mask)[0]
-            i2 = np.nonzero(~mask)[0]
-        case _:
-            raise ValueError("how must be one of {'random','half','time'}")
-
-    t1, m1, e1 = time[i1], mag[i1], err[i1]
-    t2, m2, e2 = time[i2], mag[i2], err[i2]
-    return (t1, m1, e1), (t2, m2, e2)
-
-def _wrap_angle(x):
-    """Wrap angle to (-pi, pi]."""
-    return (x + jnp.pi) % (2*jnp.pi) - jnp.pi
-
-def amp_phase_from_ab(a, b, Vaa, Vbb, Vab):
-    A = np.sqrt(a**2 + b**2)
-    phi = np.arctan2(b, a)
-    if A == 0.0:
-        # Degenerate case: no amplitude; phase undefined, set large SEs
-        return 0.0, 0.0, 0.0, np.inf
-    # Delta-method variances
-    var_A = (a*a*Vaa + b*b*Vbb + 2*a*b*Vab) / (A*A)
-    var_phi = (b*b*Vaa + a*a*Vbb - 2*a*b*Vab) / (A**4)
-    var_A = float(max(var_A, 0.0))
-    var_phi = float(max(var_phi, 0.0))
-    sigma_A = np.sqrt(var_A)
-    sigma_phi = np.sqrt(var_phi)
-    return A, phi, sigma_A, sigma_phi
-
-
-def stability_test(time, mag, err, frequency, debug: bool = False):
-    mean_time = np.mean(time)
-    (t1, m1, e1), (t2, m2, e2) = split_lightcurve_in_two(time - mean_time, mag, err, 'time')
-    soln, _ = fit_gp(jnp.asarray(t1), jnp.asarray(m1), jnp.asarray(e1), period=1./frequency, n_harmonics=1)
-    params, cov_params = soln.params['mean'], soln.state.hess_inv[-3:, -3:]
-    #_, params, cov_params = fit_sine_wave(jnp.asarray(t1), jnp.asarray(m1), jnp.asarray(e1), 1/best_freq, return_params=True)
-    A1, phi1, sigma_A1, sigma_phi1 = amp_phase_from_ab(params[1], params[2], cov_params[1, 1], cov_params[2, 2], cov_params[2, 1])
-    soln, _ = fit_gp(jnp.asarray(t2), jnp.asarray(m2), jnp.asarray(e2), period=1./frequency, n_harmonics=1)
-    params, cov_params = soln.params['mean'], soln.state.hess_inv[-3:, -3:]
-    #_, params, cov_params = fit_sine_wave(jnp.asarray(t2), jnp.asarray(m2), jnp.asarray(e2), 1/best_freq, return_params=True)
-    A2, phi2, sigma_A2, sigma_phi2 = amp_phase_from_ab(params[1], params[2], cov_params[1, 1], cov_params[2, 2], cov_params[2, 1])
-    delta_A = np.abs(A1 - A2)
-    delta_phi_raw = phi1 - phi2
-    delta_phi = _wrap_angle(delta_phi_raw)
-    sigma_delta_A = np.sqrt(sigma_A1**2 + sigma_A2**2)
-    sigma_delta_phi = np.sqrt(sigma_phi1**2 + sigma_phi2**2)
-    z_delta_A = delta_A/sigma_delta_A
-    z_delta_phi = delta_phi/sigma_delta_phi
-    snr1 = A1/sigma_A1
-    snr2 = A2/sigma_A2
-    if debug:
-        _, ax = plt.subplots(figsize=(6, 3))
-        mid = (time[-1] + time[0] - 2*mean_time)/2
-        t_ = np.linspace(np.amin(t1), mid, 100) + mean_time
-        ax.plot(t_, A1*np.cos(2*np.pi*t_*frequency - phi1))
-        t_ = np.linspace(mid, np.amax(t2), 100) + mean_time
-        ax.plot(t_, A2*np.cos(2*np.pi*t_*frequency - phi2))
-        ax.errorbar(time, mag-np.mean(mag), err, fmt='.', c='k')
-        ax.invert_yaxis()
-    return snr1, snr2, z_delta_A, z_delta_phi, np.abs(delta_phi)
-
-def stability_test_f(time, mag, err, frequencies):
-    keys = ("snr1", "snr2", "z_delta_A", "z_delta_phi", "delta_phi")
-    rows = [stability_test(time, mag, err, f) for f in frequencies]
-    if not rows:
-        return {k: [] for k in keys}
-    cols = zip(*rows)
-    return {k: list(col) for k, col in zip(keys, cols)}
 
 def fit_fourier_series_plus_red_noise(time, mag, err, freq, init_scale: float = 100., init_logit_gamma: float = 0., n_harmonics:int = 1):
     soln, _ = fit_gp(
@@ -279,16 +240,17 @@ from enum import StrEnum
 
 class Task(StrEnum):
     PERIODOGRAM_MAXIMA = "periodogram_maxima"
-    FALSE_ALARM_PROBABILITIES = "false_alarm_probabilities"
-    SUVEGES_FAP = "suveges_fap"
-    GP_FITTING = "gp_fitting"
-    STABILITY_METRICS = "stability_metrics"
-    PERIODOGRAM_SPLIT = "periodogram_split"
+    FIT_FOURIER_SERIES_MLE = "fourier_mle"
+    FIT_RED_NOISE_MLE = "red_noise_mle"
+    FIT_RED_NOISE_MCMC = "red_noise_mcmc"
+    MONTE_CARLO_FAP = "monte_carlo_fap"
 
 def extract_from_parquet(parquet_path: Path,
                          save_dir: Path,
                          task: Task,
-                         overwrite: bool = False) -> None:
+                         overwrite: bool = False,
+                         fres: float = 1e-4,
+                         ) -> None:
     jax.config.update("jax_enable_x64", True)
     (save_dir / task.value).mkdir(exist_ok=True, parents=True)
     write_path = save_dir / task.value / parquet_path.name
@@ -297,7 +259,9 @@ def extract_from_parquet(parquet_path: Path,
     df = pl.read_parquet(parquet_path)
     if df.height == 0:
         return None
-    if task is Task.FALSE_ALARM_PROBABILITIES:
+    """
+
+    if task is Task.BALUEV_FAP:
         # I need the best frequencies from PERIODOGRAM_MAXIMA
         df = df.join(
             pl.read_parquet(
@@ -306,79 +270,51 @@ def extract_from_parquet(parquet_path: Path,
             ),
             on='sourceid'
         )
-    elif task is Task.GP_FITTING or task is Task.STABILITY_METRICS:
+    """
+    if task is Task.FIT_FOURIER_SERIES_MLE:
         for col in ['best_frequencies', 'best_amplitudes']:
             if col not in df.columns:
                 raise ValueError(f"Task {task} needs column {col}.")
-
     result = []
     for k in range(df.height):
         row = df.slice(k, 1)
-        lc = pack_light_curve(row, remove_extreme_errors=True)
+        lc = clean_light_curve(unpack_light_curve(row))
+        # lc = pack_light_curve(row, remove_extreme_errors=True)
         time, mag, err = lc['g']
+        timespan = time[-1] - time[0]
         sid = row['sourceid'][0]
         if task is Task.PERIODOGRAM_MAXIMA:
             simple_features = {
                 'sourceid': sid,
+                'num_obs': len(mag),
                 'magnitude_mean': np.mean(mag),
                 'magnitude_std': np.std(mag),
-                'time_duration': time[-1] - time[0]
+                'time_duration': timespan
                 }
             #freqs, ampls = compute_periodogram(time, mag, err, fmin=7e-4, fmax=25.0, fres=1e-5)
-            freqs, ampls = compute_periodogram(time, mag, err, fmin=7e-4, fmax=1.0, fres=1e-5)
+            freqs, ampls = compute_periodogram(time, mag, err, fmin=1/timespan, fmax=1.0, fres=fres)
             best_idxs = find_local_maxima(ampls, how_many=10) # This come in decreasing order of amplitude
             best_frequencies = freqs[best_idxs]
             best_amplitudes = ampls[best_idxs]
             best = {'best_frequencies': best_frequencies.tolist(), 'best_amplitudes': best_amplitudes.tolist()}
             result.append(simple_features | best)
-        elif task is Task.FALSE_ALARM_PROBABILITIES:
-            best_frequencies = jnp.asarray(row['best_frequencies'][0].to_numpy())
-            faps = false_alarm_probabilities(best_frequencies, [1e-3, 1e-4], time, mag, err, num_reps=200)
-            result.append({'sourceid': sid} | faps)
-        elif task is Task.GP_FITTING:
+        elif task is Task.FIT_FOURIER_SERIES_MLE:
             best_frequencies = jnp.asarray(row['best_frequencies'][0].to_numpy())
             n_harmonics = 1
             for freq in best_frequencies:
                 params = fit_fourier_series_plus_red_noise(time, mag, err, freq, n_harmonics=n_harmonics)
                 result.append({'sourceid': sid, 'frequency': freq, 'n_harmonics': n_harmonics} | params)
-        elif task is Task.SUVEGES_FAP:
-            T = time[-1] - time[0]
-            faps = sugeves_fap([1e-1, 1e-2, 1e-3], time, mag, err, 1./T, 1.0, 1e-4, num_reps=1000)
-            result.append({'sourceid': sid} | faps)
-        elif task is Task.PERIODOGRAM_SPLIT:
-            (t1, m1, e1), (t2, m2, e2) = split_lightcurve_in_two(time, mag, err, 'time')
-            T1 = t1[-1] - t1[0]
-            T2 = t2[-1] - t2[0]
-            Tmin = min(T1, T2)
-            freqs, ampls = compute_periodogram(t1, m1, e1, fmin=1/Tmin, fmax=1.0, fres=1e-5)
-            best_idxs = find_local_maxima(ampls, how_many=3)
-            best_frequencies1 = freqs[best_idxs]
-            best_amplitudes1 = ampls[best_idxs]
-            freqs, ampls = compute_periodogram(t2, m2, e2, fmin=1/Tmin, fmax=1.0, fres=1e-5)
-            best_idxs = find_local_maxima(ampls, how_many=3) # This come in decreasing order of amplitude
-            best_frequencies2 = freqs[best_idxs]
-            best_amplitudes2 = ampls[best_idxs]
-            best = {
-                'time_duration_left': T1,
-                'num_obs_left': len(t1),
-                'best_frequencies_left': best_frequencies1.tolist(), 
-                'best_amplitudes_left': best_amplitudes1.tolist(),
-                'time_duration_right': T2,
-                'num_obs_right': len(t2),
-                'best_frequencies_right': best_frequencies2.tolist(), 
-                'best_amplitudes_right': best_amplitudes2.tolist()
-
-            }
-            result.append({'sourceid': sid} | best)
-        elif task is Task.STABILITY_METRICS:
-            best_frequencies = jnp.asarray(row['best_frequencies'][0].to_numpy())
-            try:
-                m = stability_test_f(time, mag, err, best_frequencies)
-                result.append({'sourceid': sid} | m)
-            except Exception as e:
-                print(f"Source {sid} failed due to {e}")
-                
-
+        elif task is Task.FIT_RED_NOISE_MLE:
+            _, params, mle = fit_gp_red_noise(time, mag, err, fit_gamma=True)
+            result.append({'sourceid': sid, 'mle': mle} | params)
+        elif task is Task.FIT_RED_NOISE_MCMC:
+            samples, r_hats, n_effs = mcmc_red_noise(time, mag, err)
+            result.append(
+                {'sourceid': row['sourceid'].item()} | r_hats | n_effs | {k: v.tolist() for k, v in samples.items()}
+            )
+        #elif task is Task.MONTE_CARLO_FAP_MLE:
+        #    faps = mc_fap_distribution(time, mag, err, 1./timespan, 1.0, fres, num_reps=1000)
+        #    result.append({'sourceid': sid} | faps)
     pl.from_dicts(result).write_parquet(write_path)
 
 
