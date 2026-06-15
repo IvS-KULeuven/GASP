@@ -5,7 +5,6 @@ import polars as pl
 def pack_light_curve(df_row: pl.DataFrame,
                      remove_extreme_errors: bool = False,
                      use_robust_statistics: bool = True,
-                     max_length: int | None = None,
                      ) -> dict[str, np.ndarray]:
     def col_to_array(col: pl.Series) -> np.ndarray | None:
         if col[0] is None:
@@ -34,11 +33,6 @@ def pack_light_curve(df_row: pl.DataFrame,
             if scale > 0.0:
                 inliers = valerr < center + 3*scale
                 lcb = lcb[:, inliers]
-        if max_length is not None:
-            lc_length = lcb.shape[-1]
-            if lc_length > max_length:
-                idx = np.random.permutation(lcb.shape[-1])[:max_length]
-                lcb = lcb[:, idx]
         idx = lcb[0].argsort()
         light_curve[band] = lcb[:, idx]
     return light_curve
