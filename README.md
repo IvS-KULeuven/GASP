@@ -1,10 +1,11 @@
 # *Gaia* AGN Survey of Periodic variability (GASP)
 
-This repository holds the implementation of the methods described in ["A search for periodic AGN variability in Gaia Data Release 3"](https://arxiv.org/abs/2505.16884). 
+This repository holds the methods and results described in ["A search for periodic AGN variability in Gaia Data Release 3"](https://arxiv.org/abs/2505.16884). 
 
-The contents of the `notebooks` directory in this repository include:
+The contents of the `notebooks` directory include:
 
 - `gaia_qso_initial_selection.ipynb`: Shows the criteria used to create the initial *Gaia* AGN selection. 
+- `dr3_candidate_analysis_MAP/MCMC.ipynb`: Performs the selection based on the Monte-Carlo false alarm probabilities obtained via MAP/MCMC posterior fits.
 - `methodology_example.ipynb`: Shows all the steps of the pipeline interactively for a single source
 
 The dominant frequencies, red noise parameters and p-values can be found in the `result` folder of this repository.
