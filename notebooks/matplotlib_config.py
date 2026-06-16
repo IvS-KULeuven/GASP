@@ -1,0 +1,16 @@
+rcparams = {
+    "axes.labelsize":    12,
+    "xtick.labelsize":   10,
+    "ytick.labelsize":   10,
+    "legend.fontsize":   10,
+    "axes.linewidth":    0.7,
+    "xtick.major.width": 0.7,
+    "ytick.major.width": 0.7,
+    "xtick.minor.width": 0.5,
+    "ytick.minor.width": 0.5,
+    "xtick.direction":   "in",
+    "ytick.direction":   "in",
+    "xtick.top":         True,
+    "ytick.right":       True,
+    "lines.linewidth":   0.9,
+}

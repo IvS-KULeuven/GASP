@@ -5,6 +5,7 @@ from tqdm import tqdm
 
 def jax_joblib_configuration():
     import os
+    os.environ["POLARS_MAX_THREADS"] = "1"
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["OPENBLAS_NUM_THREADS"] = "1"
     os.environ["MKL_NUM_THREADS"] = "1"
